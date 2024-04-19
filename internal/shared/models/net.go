@@ -4,11 +4,16 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"strconv"
 )
 
 type Addr struct {
 	IP   net.IP
 	Port uint16
+}
+
+func (a *Addr) String() string {
+	return net.JoinHostPort(a.IP.String(), strconv.Itoa(int(a.Port)))
 }
 
 var ErrInvalidAddr = errors.New("invalid address")
