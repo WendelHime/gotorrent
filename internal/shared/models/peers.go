@@ -10,7 +10,6 @@ type PeerMessage struct {
 
 type Peer struct {
 	Addr         Addr
-	Port         int
 	Conn         net.Conn
 	PeerID       string
 	HavePieces   map[int]struct{}
