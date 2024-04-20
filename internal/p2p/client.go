@@ -12,6 +12,7 @@ import (
 )
 
 type P2PClient interface {
+	Connected() bool
 	Connect(address models.Addr) error
 	Disconnect() error
 	Handshake(hash models.Hash) error
@@ -35,6 +36,10 @@ func (c *client) Connect(address models.Addr) error {
 	}
 	c.conn = conn
 	return nil
+}
+
+func (c *client) Connected() bool {
+	return c.conn != nil
 }
 
 func (c *client) Disconnect() error {
