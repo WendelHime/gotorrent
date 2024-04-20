@@ -1,10 +1,15 @@
 package tracker
 
 import (
+	"bytes"
+	"crypto/rand"
 	"encoding/binary"
+	"errors"
+	"io"
 	"net"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/WendelHime/gotorrent/internal/decoder"
 	"github.com/WendelHime/gotorrent/internal/shared/models"
@@ -18,6 +23,15 @@ type UDPGetter struct {
 func NewUDPGetter(peerID string) PeersGetter {
 	return UDPGetter{peerID: peerID}
 }
+
+type Event int
+
+const (
+	EventNone Event = iota
+	EventCompleted
+	EventStarted
+	EventStopped
+)
 
 func (u UDPGetter) GetPeers(announce string, metafile models.Metafile) ([]models.Peer, error) {
 	tracker, err := url.Parse(announce)
@@ -46,67 +60,98 @@ func (u UDPGetter) GetPeers(announce string, metafile models.Metafile) ([]models
 	}
 	defer conn.Close()
 
-	buf := make([]byte, 16)
+	err = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if err != nil {
+		return nil, err
+	}
 
-	transactionID := 4609668
-	binary.BigEndian.PutUint64(buf[0:], 0x41727101980)          // connection_id
-	binary.BigEndian.PutUint32(buf[8:], 0)                      // action
-	binary.BigEndian.PutUint32(buf[12:], uint32(transactionID)) // transaction_id
+	transactionID, err := generateTransactionID()
+	if err != nil {
+		return nil, err
+	}
 
-	_, err = conn.Write(buf)
+	connectRequest := bytes.NewBuffer(nil)
+	binary.Write(connectRequest, binary.BigEndian, uint64(0x41727101980)) // protocol_id
+	binary.Write(connectRequest, binary.BigEndian, uint32(0))             // action
+	binary.Write(connectRequest, binary.BigEndian, transactionID)         // transaction_id
+
+	_, err = conn.Write(connectRequest.Bytes())
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := decoder.ReadBytes(conn, 16)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+
+	if len(resp) < 16 {
+		return nil, errors.New("invalid response")
+	}
+	action := binary.BigEndian.Uint32(resp[:4])
+	txID := binary.BigEndian.Uint32(resp[4:8])
+	connectionID := binary.BigEndian.Uint64(resp[8:16])
+	if txID != transactionID {
+		return nil, errors.New("invalid transaction ID")
+	}
+
+	if action != 0 {
+		return nil, errors.New("invalid action")
+	}
+
+	transactionID, err = generateTransactionID()
 	if err != nil {
 		return nil, err
 	}
 
-	// action := binary.BigEndian.Uint32(resp[:4])
-	// transaction_id := binary.BigEndian.Uint32(resp[4:8])
-	connection_id := binary.BigEndian.Uint64(resp[8:])
+	peersRequested := -1
+	req := bytes.NewBuffer(nil)
+	binary.Write(req, binary.BigEndian, uint64(connectionID)) // connection_id
+	binary.Write(req, binary.BigEndian, uint32(1))            // action
+	binary.Write(req, binary.BigEndian, transactionID)        // transaction_id
+	req.Write(metafile.InfoHash.Hash)
+	req.Write([]byte(u.peerID))
+	binary.Write(req, binary.BigEndian, uint64(0))                    // downloaded
+	binary.Write(req, binary.BigEndian, uint64(metafile.Info.Length)) // left
+	binary.Write(req, binary.BigEndian, uint64(0))                    // uploaded
+	binary.Write(req, binary.BigEndian, uint32(EventNone))            // event
+	binary.Write(req, binary.BigEndian, uint32(0))                    // ip
+	binary.Write(req, binary.BigEndian, uint32(0))                    // key
+	binary.Write(req, binary.BigEndian, int32(peersRequested))        // num_want
+	binary.Write(req, binary.BigEndian, uint16(peerPort))             // port
 
-	buf = make([]byte, 100)
-
-	peersRequested := 100
-	binary.BigEndian.PutUint64(buf[0:8], connection_id)                  // int64_t 	connection_id 	The connection id acquired from establishing the connection.
-	binary.BigEndian.PutUint32(buf[8:12], 1)                             // int32_t 	action 	Action. in this case, 1 for announce. See actions.
-	binary.BigEndian.PutUint32(buf[12:16], uint32(transactionID))        // int32_t 	transaction_id 	Randomized by client.
-	copyToSlice(buf, metafile.InfoHash.Hash, 16)                         // int8_t[20] 	info_hash 	The info-hash of the torrent you want announce yourself in.
-	copyToSlice(buf, []byte(u.peerID), 36)                               // int8_t[20] 	peer_id 	Your peer id.
-	binary.BigEndian.PutUint64(buf[56:64], 0)                            // int64_t 	downloaded 	The number of byte you've downloaded in this session.
-	binary.BigEndian.PutUint64(buf[64:72], uint64(metafile.Info.Length)) // int64_t 	left 	The number of bytes you have left to download until you're finished.
-	binary.BigEndian.PutUint64(buf[72:80], 0)                            // int64_t 	uploaded 	The number of bytes you have uploaded in this session.
-	binary.BigEndian.PutUint32(buf[80:84], 0)                            // int32_t 	event
-	binary.BigEndian.PutUint32(buf[84:88], 0)                            // uint32_t 	ip 	Your ip address. Set to 0 if you want the tracker to use the sender of this UDP packet.
-	binary.BigEndian.PutUint32(buf[88:92], uint32(transactionID))        // uint32_t 	key 	A unique key that is randomized by the client.
-	binary.BigEndian.PutUint32(buf[92:96], uint32(peersRequested))       // int32_t 	num_want 	The maximum number of peers you want in the reply. Use -1 for default.
-	binary.BigEndian.PutUint16(buf[96:98], 9999)                         // uint16_t 	port 	The port you're listening on.
-	binary.BigEndian.PutUint16(buf[98:100], 0)                           // uint16_t 	extensions
-
-	_, err = conn.Write(buf)
+	// sending announce request
+	_, err = conn.Write(req.Bytes())
 	if err != nil {
 		return nil, err
 	}
 
-	buf = make([]byte, 100+peersRequested*6)
-	readed, err := conn.Read(buf)
-	if err != nil {
+	resp, err = decoder.ReadBytes(conn, 2048)
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
 
-	//action = binary.BigEndian.Uint32(buf[:4])
-	//transaction_id = binary.BigEndian.Uint32(buf[4:8])
-	interval := binary.BigEndian.Uint32(buf[8:12])
+	if len(resp) < 20 {
+		return nil, errors.New("invalid response")
+	}
+
+	action = binary.BigEndian.Uint32(resp[:4])
+	txID = binary.BigEndian.Uint32(resp[4:8])
+	// interval := binary.BigEndian.Uint32(resp[8:12])
 	// leechers := binary.BigEndian.Uint32(buf[12:16])
 	// seeders := binary.BigEndian.Uint32(buf[16:20])
 
-	peerData := buf[20:readed]
+	if txID != transactionID {
+		return nil, errors.New("invalid transaction ID")
+	}
+
+	if action != 1 {
+		return nil, errors.New("invalid action")
+	}
+
+	peerData := resp[20:]
 
 	peers := make([]models.Peer, 0)
-
-	u.interval = int(interval)
 
 	for {
 		addr := models.Addr{}
@@ -115,8 +160,6 @@ func (u UDPGetter) GetPeers(announce string, metafile models.Metafile) ([]models
 			return nil, err
 		}
 
-		peerData = peerData[6:]
-
 		peer := models.Peer{
 			Addr:         addr,
 			HavePieces:   make(map[int]struct{}),
@@ -124,6 +167,12 @@ func (u UDPGetter) GetPeers(announce string, metafile models.Metafile) ([]models
 		}
 
 		peers = append(peers, peer)
+
+		if len(peerData) < 6 {
+			break
+		}
+
+		peerData = peerData[6:]
 		if len(peerData) == 0 {
 			break
 		}
@@ -136,4 +185,19 @@ func copyToSlice(dst []byte, src []byte, offset int) {
 	for i, b := range src {
 		dst[offset+i] = b
 	}
+}
+func generateTransactionID() (uint32, error) {
+	var transactionID uint32
+	randomBytes := make([]byte, 4) // 4 bytes for a uint32
+
+	// Read 4 random bytes from the crypto/rand package
+	_, err := rand.Read(randomBytes)
+	if err != nil {
+		return 0, err
+	}
+
+	// Convert the random bytes to a uint32
+	transactionID = binary.BigEndian.Uint32(randomBytes)
+
+	return transactionID, nil
 }
