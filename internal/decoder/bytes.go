@@ -10,7 +10,7 @@ func ReadBytes(r io.Reader, n int) ([]byte, error) {
 		buff := make([]byte, needToRead)
 		readed, err := r.Read(buff)
 		if err != nil {
-			return nil, err
+			return result, err
 		}
 
 		result = append(result, buff[:readed]...)
