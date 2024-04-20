@@ -30,7 +30,7 @@ func NewTracker(announceURL, peerID string) Tracker {
 	return &tracker{
 		AnnounceURL: announceURL,
 		PeerID:      peerID,
-		HTTPClient:  NewHTTPGetter(&http.Client{Timeout: 5 * time.Second}, peerID),
+		HTTPClient:  NewHTTPGetter(&http.Client{Timeout: 30 * time.Second}, peerID),
 		UDPClient:   NewUDPGetter(peerID),
 	}
 }
