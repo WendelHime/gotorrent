@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"net"
 
 	"github.com/WendelHime/gotorrent/internal/decoder"
@@ -104,7 +103,6 @@ func decodeHandshake(buf []byte) (handshake, error) {
 }
 
 func (c *client) WriteMessage(msg models.PeerMessage) error {
-	fmt.Printf("Sending message %+v\n", msg)
 	buf := make([]byte, 5)
 	binary.BigEndian.PutUint32(buf, uint32(msg.Length))
 	buf[4] = byte(msg.ID)
