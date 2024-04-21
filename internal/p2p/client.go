@@ -62,7 +62,7 @@ func (h handshake) Bytes() []byte {
 	buf[0] = 19 // length of the protocol
 	buf = append(buf, []byte("BitTorrent protocol")...)
 	buf = append(buf, make([]byte, 8)...) // eight reserved bytes
-	buf = append(buf, h.InfoHash.Hash...)
+	buf = append(buf, h.InfoHash.Hash[:]...)
 	buf = append(buf, []byte(h.PeerID)...) // peer id
 	return buf
 }
@@ -97,7 +97,7 @@ func decodeHandshake(buf []byte) (handshake, error) {
 	}
 
 	return handshake{
-		InfoHash: models.Hash{Hash: buf[28:48]},
+		InfoHash: models.Hash{Hash: [20]byte(buf[28:48])},
 		PeerID:   hex.EncodeToString(buf[48:]),
 	}, nil
 }

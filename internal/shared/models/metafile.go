@@ -9,7 +9,7 @@ type Metafile struct {
 
 type Info struct {
 	Name         string `bencode:"name"`
-	Length       int    `bencode:"length"`
+	Length       int    `bencode:"length,omitempty"`
 	PieceLength  int    `bencode:"piece length"`
 	Pieces       string `bencode:"pieces"`
 	PiecesHashes []Hash `bencode:"-"`
@@ -17,14 +17,14 @@ type Info struct {
 }
 
 type File struct {
-	Length int    `bencode:"length"`
-	Path   string `bencode:"path"`
+	Length int      `bencode:"length"`
+	Path   []string `bencode:"path"`
 }
 
 type Hash struct {
-	Hash []byte
+	Hash [20]byte
 }
 
 func (h Hash) String() string {
-	return string(h.Hash)
+	return string(h.Hash[:])
 }
