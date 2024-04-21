@@ -21,7 +21,13 @@ func main() {
 	}
 	defer f.Close()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	// Create a new logger and generate log file
+	logOut, err := os.Create("log.txt")
+	if err != nil {
+		panic(err)
+	}
+	defer logOut.Close()
+	logger := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	downloader := logic.NewDownloader(decoder.NewDecoder(), logger)
 	err = downloader.Download(f, outputDir)
