@@ -130,6 +130,8 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 		index += file.Length
 	}
 
+	d.log.Info("file positions", slog.Any("file_positions", filePositions))
+
 	go func() {
 		defer writeWaitGroup.Done()
 		for piece := range writeQueue {
