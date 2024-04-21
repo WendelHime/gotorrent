@@ -72,6 +72,7 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 		return err
 	}
 
+	bar := progressbar.DefaultBytes(int64(-1), "retrieving peers")
 	d.log.Info("retrieving peers", slog.Any("len piece hashes", len(meta.Info.PiecesHashes)))
 	peers, err := d.retrievePeers(meta)
 	if err != nil {
@@ -102,7 +103,8 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 	if meta.Info.Length == 0 {
 		meta.Info.Length = calculateTotalLength(meta.Info.Files)
 	}
-	bar := progressbar.DefaultBytes(int64(meta.Info.Length), "downloading")
+	bar.ChangeMax(meta.Info.Length)
+	bar.Describe("downloading")
 	var wg sync.WaitGroup
 	wg.Add(len(pieces))
 
