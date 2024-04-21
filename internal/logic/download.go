@@ -411,6 +411,7 @@ func (d *downloader) writeFile(filepath string, meta models.Metafile, piece mode
 
 	writtenBytes := 0
 	for _, block := range piece.Blocks {
+		pieceOffset := piece.Index*meta.Info.PieceLength + block.Begin
 		n, err := file.WriteAt(block.Data, int64(pieceOffset))
 		if err != nil {
 			return writtenBytes, err
