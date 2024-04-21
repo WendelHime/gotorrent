@@ -42,12 +42,12 @@ go test -cover -race ./...
 
 ### Known issues
 
-- This program currently isn't supporting UDP trackers so some torrent files won't be able to download at this moment.
+- This program only support ipv4 addresses.
 - I've only tested with a couple torrent files like for [debian images](https://www.debian.org/CD/http-ftp/#mirrors) - look for the best mirror for you and if there's any torrent file available you can try it (don't forget to verify/validate hashes!)
 
 ### Future improvements
 
+- Add support to ipv6 addresses
 - Keep track of stored pieces and download missing pieces if the program was interrupted
-- Implement correctly the UDP tracker
 - Add more unit tests/improve test coverage
 - Seed data
