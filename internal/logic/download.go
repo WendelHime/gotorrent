@@ -152,13 +152,16 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 			for _, file := range meta.Info.Files {
 				fp := path.Join(file.Path...)
 				fp = path.Join(outputDir, fp)
-				if piece.Blocks[0].Begin >= filePositions[fp].Begin && piece.Blocks[len(piece.Blocks)-1].Begin < filePositions[fp].End {
-					n, err := d.writeFile(fp, meta, piece)
-					if err != nil {
-						d.log.Error("failed to save piece to file", slog.Any("error", err))
-						continue
+				for _, block := range piece.Blocks {
+					pieceOffset := piece.Index*meta.Info.PieceLength + block.Begin
+					if pieceOffset >= filePositions[fp].Begin && pieceOffset < filePositions[fp].End {
+						n, err := d.writeFile(fp, meta, piece)
+						if err != nil {
+							d.log.Error("failed to save piece to file", slog.Any("error", err))
+							continue
+						}
+						bar.Add(n)
 					}
-					bar.Add(n)
 				}
 			}
 		}
@@ -408,7 +411,6 @@ func (d *downloader) writeFile(filepath string, meta models.Metafile, piece mode
 
 	writtenBytes := 0
 	for _, block := range piece.Blocks {
-		pieceOffset := piece.Index*meta.Info.PieceLength + block.Begin
 		n, err := file.WriteAt(block.Data, int64(pieceOffset))
 		if err != nil {
 			return writtenBytes, err
