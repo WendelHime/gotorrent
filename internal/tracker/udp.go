@@ -72,7 +72,6 @@ func (u UDPGetter) GetPeers(announceURL string, metafile models.Metafile) ([]mod
 		return nil, err
 	}
 
-	fmt.Printf("announce response: %+v\n", announceResponse)
 	return announceResponse.Peers, nil
 }
 
@@ -104,7 +103,6 @@ func connect(raddr net.UDPAddr) (net.Conn, uint64, error) {
 			return nil, 0, err
 		}
 
-		fmt.Printf("Sending connect request %+v to %s\n", connectRequest, raddr.String())
 		n, err = conn.Write(connectRequest.Bytes())
 		if err != nil {
 			return nil, 0, err
@@ -113,7 +111,6 @@ func connect(raddr net.UDPAddr) (net.Conn, uint64, error) {
 			return nil, 0, errors.New("invalid write")
 		}
 
-		fmt.Printf("Reading connect response from %s\n", raddr.String())
 		err = conn.SetReadDeadline(time.Now().Add(timeout))
 		if err != nil {
 			return nil, 0, err
@@ -201,7 +198,6 @@ func announce(conn net.Conn, connectionID uint64, metafile models.Metafile, peer
 			return AnnounceResponse{}, errors.New("invalid write")
 		}
 
-		fmt.Printf("Reading announce response\n")
 		err = conn.SetReadDeadline(time.Now().Add(timeout))
 		if err != nil {
 			return AnnounceResponse{}, err
@@ -297,7 +293,6 @@ func (r *AnnounceRequest) Bytes() ([]byte, error) {
 	binary.BigEndian.PutUint32(req[88:92], r.Key)           // key
 	binary.BigEndian.PutUint32(req[92:96], r.NumWant)       // num_want
 	binary.BigEndian.PutUint16(req[96:98], r.Port)          // port
-	fmt.Printf("announce message: %x\n", req)
 	return req, nil
 }
 
@@ -348,8 +343,6 @@ func readAnnounceResponse(conn net.Conn, piecesWanted int) (AnnounceResponse, er
 		}
 		peers = append(peers, p)
 	}
-
-	fmt.Printf("peers: %v\n", peers)
 
 	return AnnounceResponse{Action: Action(action), TransactionID: txID, Interval: interval, Leechers: leechers, Seeders: seeders, Peers: peers}, nil
 }
