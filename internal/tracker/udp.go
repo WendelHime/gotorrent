@@ -2,15 +2,15 @@ package tracker
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"math"
+	"math/rand"
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/WendelHime/gotorrent/internal/decoder"
@@ -38,12 +38,12 @@ const (
 type Action uint32
 
 const (
-	ActionConnect Action = iota
-	ActionAnnounce
+	ActionConnect  Action = 0
+	ActionAnnounce Action = 1
 )
 
-func (u UDPGetter) GetPeers(announce string, metafile models.Metafile) ([]models.Peer, error) {
-	tracker, err := url.Parse(announce)
+func (u UDPGetter) GetPeers(announceURL string, metafile models.Metafile) ([]models.Peer, error) {
+	tracker, err := url.Parse(announceURL)
 	if err != nil {
 		return nil, err
 	}
@@ -62,109 +62,171 @@ func (u UDPGetter) GetPeers(announce string, metafile models.Metafile) ([]models
 		IP:   ip[0],
 		Port: peerPort,
 	}
-	conn, err := net.DialUDP("udp", nil, &raddr)
+	conn, connID, err := connect(raddr)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-	fmt.Println("Connected to tracker", raddr.String())
-	for n := 0; n < 8; n++ {
-		fmt.Println("attempt", n)
-		waitTime := int64(15 * math.Pow(2, float64(n)))
-		err = conn.SetDeadline(time.Now().Add(time.Duration(waitTime) * time.Second))
-		if err != nil {
-			return nil, err
-		}
 
-		transactionID, err := generateTransactionID()
-		if err != nil {
-			return nil, err
-		}
-
-		connectRequest := ConnectRequest{
-			ProtocolID:    0x41727101980,
-			Action:        ActionConnect,
-			TransactionID: transactionID,
-		}
-
-		fmt.Println("Sending connect request", connectRequest, raddr.String())
-		_, err = conn.Write(connectRequest.Bytes())
-		if err != nil {
-			return nil, err
-		}
-
-		fmt.Println("Reading connect response", raddr.String())
-		connectResponse, err := readConnectResponse(conn)
-		if err != nil {
-			if err, ok := err.(net.Error); ok && err.Timeout() {
-				continue
-			}
-			return nil, err
-		}
-
-		if connectResponse.TransactionID != connectRequest.TransactionID {
-			return nil, errors.New("invalid transaction ID")
-		}
-
-		if connectResponse.Action != 0 {
-			return nil, errors.New("invalid action")
-		}
-
-		transactionID, err = generateTransactionID()
-		if err != nil {
-			return nil, err
-		}
-
-		peersRequested := 100
-		announceRequest := AnnounceRequest{
-			ConnectionID:  connectResponse.ConnectionID,
-			Action:        ActionAnnounce,
-			TransactionID: transactionID,
-			InfoHash:      metafile.InfoHash.String(),
-			PeerID:        u.peerID,
-			Downloaded:    0,
-			Left:          uint64(metafile.Info.Length),
-			Uploaded:      0,
-			Event:         EventStarted,
-			IP:            0,
-			Key:           0,
-			NumWant:       int32(peersRequested),
-			Port:          uint16(peerPort),
-		}
-
-		fmt.Println("Sending announce request", announceRequest, raddr.String())
-		// sending announce request
-		b, err := announceRequest.Bytes()
-		if err != nil {
-			return nil, err
-		}
-
-		_, err = conn.Write(b)
-		if err != nil {
-			return nil, err
-		}
-
-		fmt.Println("Reading announce response", raddr.String())
-		announceResponse, err := readAnnounceResponse(conn, peersRequested)
-		if err != nil {
-			if err, ok := err.(net.Error); ok && err.Timeout() {
-				continue
-			}
-			return nil, err
-		}
-
-		if announceResponse.TransactionID != announceRequest.TransactionID {
-			return nil, errors.New("invalid transaction ID")
-		}
-
-		if announceResponse.Action != ActionAnnounce {
-			return nil, errors.New("invalid action")
-		}
-		return announceResponse.Peers, nil
-
+	announceResponse, err := announce(conn, connID, metafile, u.peerID)
+	if err != nil {
+		return nil, err
 	}
 
-	return []models.Peer{}, nil
+	fmt.Printf("announce response: %+v\n", announceResponse)
+	return announceResponse.Peers, nil
+}
+
+func connect(raddr net.UDPAddr) (net.Conn, uint64, error) {
+	timeout := 15 * time.Second
+	conn, err := net.DialTimeout("udp", raddr.String(), timeout)
+	if err != nil {
+		return nil, 0, err
+	}
+	transactionID, err := generateTransactionID()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	connectRequest := ConnectRequest{
+		ProtocolID:    0x41727101980,
+		Action:        ActionConnect,
+		TransactionID: transactionID,
+	}
+
+	var n, retries int
+	var connectResponse ConnectResponse
+
+	for {
+		retries++
+
+		err = conn.SetWriteDeadline(time.Now().Add(timeout))
+		if err != nil {
+			return nil, 0, err
+		}
+
+		fmt.Printf("Sending connect request %+v to %s\n", connectRequest, raddr.String())
+		n, err = conn.Write(connectRequest.Bytes())
+		if err != nil {
+			return nil, 0, err
+		}
+		if n != len(connectRequest.Bytes()) {
+			return nil, 0, errors.New("invalid write")
+		}
+
+		fmt.Printf("Reading connect response from %s\n", raddr.String())
+		err = conn.SetReadDeadline(time.Now().Add(timeout))
+		if err != nil {
+			return nil, 0, err
+		}
+		connectResponse, n, err = readConnectResponse(conn)
+		if err != nil {
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				if retries > 8 {
+					return nil, 0, errors.New("too many retries")
+				}
+				continue
+			}
+			return nil, 0, err
+		}
+
+		break
+	}
+	if n != 16 {
+		return nil, 0, fmt.Errorf("invalid response: %d", n)
+	}
+	if connectResponse.TransactionID != connectRequest.TransactionID {
+		return nil, 0, errors.New("invalid transaction ID")
+	}
+
+	if connectResponse.Action != 0 {
+		return nil, 0, errors.New("invalid action")
+	}
+
+	return conn, connectResponse.ConnectionID, nil
+}
+func announce(conn net.Conn, connectionID uint64, metafile models.Metafile, peerID string) (AnnounceResponse, error) {
+	timeout := 15 * time.Second
+	transactionID, err := generateTransactionID()
+	if err != nil {
+		return AnnounceResponse{}, err
+	}
+
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	peersRequested := -1
+
+	peerIDReader := strings.NewReader(peerID)
+	p := make([]byte, 20)
+	_, err = peerIDReader.Read(p)
+	if err != nil {
+		return AnnounceResponse{}, err
+	}
+
+	announceRequest := AnnounceRequest{
+		ConnectionID:  connectionID,
+		Action:        ActionAnnounce,
+		TransactionID: transactionID,
+		InfoHash:      metafile.InfoHash.Hash,
+		PeerID:        [20]byte(p),
+		Downloaded:    0,
+		Left:          uint64(metafile.Info.Length),
+		Uploaded:      0,
+		Event:         EventNone,
+		IP:            0,
+		Key:           r.Uint32(),
+		NumWant:       uint32(peersRequested),
+		Port:          uint16(6881),
+	}
+	b, err := announceRequest.Bytes()
+	if err != nil {
+		return AnnounceResponse{}, err
+	}
+
+	var announceResponse AnnounceResponse
+	var n, retries int
+
+	for {
+		retries++
+		err = conn.SetWriteDeadline(time.Now().Add(timeout))
+		if err != nil {
+			return AnnounceResponse{}, err
+		}
+		// sending announce request
+		n, err = conn.Write(b)
+		if err != nil {
+			return AnnounceResponse{}, err
+		}
+
+		if n != len(b) {
+			return AnnounceResponse{}, errors.New("invalid write")
+		}
+
+		fmt.Printf("Reading announce response\n")
+		err = conn.SetReadDeadline(time.Now().Add(timeout))
+		if err != nil {
+			return AnnounceResponse{}, err
+		}
+		announceResponse, err = readAnnounceResponse(conn, len(metafile.Info.PiecesHashes))
+		if err != nil {
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				if retries > 8 {
+					return AnnounceResponse{}, errors.New("too many retries")
+				}
+				continue
+			}
+			return AnnounceResponse{}, err
+		}
+		break
+	}
+
+	if announceResponse.TransactionID != announceRequest.TransactionID {
+		return AnnounceResponse{}, errors.New("invalid transaction ID")
+	}
+
+	if announceResponse.Action != ActionAnnounce {
+		return AnnounceResponse{}, errors.New("invalid action")
+	}
+	return announceResponse, nil
 }
 
 type ConnectRequest struct {
@@ -187,69 +249,56 @@ func (request ConnectRequest) Bytes() []byte {
 	return connectRequest.Bytes()
 }
 
-func readConnectResponse(conn net.Conn) (ConnectResponse, error) {
+func readConnectResponse(conn net.Conn) (ConnectResponse, int, error) {
 	resp, err := decoder.ReadBytes(conn, 16)
 	if err != nil && err != io.EOF {
-		return ConnectResponse{}, err
+		return ConnectResponse{}, 0, err
 	}
 
-	if len(resp) < 16 {
-		return ConnectResponse{}, errors.New("invalid response")
+	n := len(resp)
+	if n < 16 {
+		return ConnectResponse{}, n, fmt.Errorf("invalid response: %d", n)
 	}
 	action := binary.BigEndian.Uint32(resp[:4])
 	txID := binary.BigEndian.Uint32(resp[4:8])
-	connectionID := binary.BigEndian.Uint64(resp[8:16])
+	connectionID := binary.BigEndian.Uint64(resp[8:])
 
-	return ConnectResponse{Action: Action(action), TransactionID: txID, ConnectionID: connectionID}, nil
+	return ConnectResponse{Action: Action(action), TransactionID: txID, ConnectionID: connectionID}, n, nil
 }
 
 type AnnounceRequest struct {
 	ConnectionID  uint64
 	Action        Action
 	TransactionID uint32
-	InfoHash      string
-	PeerID        string
+	InfoHash      [20]byte
+	PeerID        [20]byte
 	Downloaded    uint64
 	Left          uint64
 	Uploaded      uint64
 	Event         Event
 	IP            uint32
 	Key           uint32
-	NumWant       int32
+	NumWant       uint32
 	Port          uint16
 }
 
 func (r *AnnounceRequest) Bytes() ([]byte, error) {
-	req := bytes.NewBuffer(nil)
-	binary.Write(req, binary.BigEndian, r.ConnectionID)   // connection_id
-	binary.Write(req, binary.BigEndian, uint32(r.Action)) // action
-	binary.Write(req, binary.BigEndian, r.TransactionID)  // transaction_id
-	n, err := req.WriteString(r.InfoHash)                 // info_hash
-	if err != nil {
-		return nil, err
-	}
-
-	if n < 20 || n > 20 {
-		return nil, errors.New("invalid info hash")
-	}
-
-	n, err = req.WriteString(r.PeerID) // peer_id
-	if err != nil {
-		return nil, err
-	}
-
-	if n < 20 || n > 20 {
-		return nil, errors.New("invalid peer id")
-	}
-	binary.Write(req, binary.BigEndian, r.Downloaded)    // downloaded
-	binary.Write(req, binary.BigEndian, r.Left)          // left
-	binary.Write(req, binary.BigEndian, r.Uploaded)      // uploaded
-	binary.Write(req, binary.BigEndian, uint32(r.Event)) // event
-	binary.Write(req, binary.BigEndian, r.IP)            // ip
-	binary.Write(req, binary.BigEndian, r.Key)           // key
-	binary.Write(req, binary.BigEndian, r.NumWant)       // num_want
-	binary.Write(req, binary.BigEndian, r.Port)          // port
-	return req.Bytes(), nil
+	req := make([]byte, 98)
+	binary.BigEndian.PutUint64(req[0:8], r.ConnectionID)    // connection_id
+	binary.BigEndian.PutUint32(req[8:12], uint32(r.Action)) // action
+	binary.BigEndian.PutUint32(req[12:16], r.TransactionID) // transaction_id
+	copy(req[16:36], r.InfoHash[:])
+	copy(req[36:56], r.PeerID[:])
+	binary.BigEndian.PutUint64(req[56:64], r.Downloaded)    // downloaded
+	binary.BigEndian.PutUint64(req[64:72], r.Left)          // left
+	binary.BigEndian.PutUint64(req[72:80], r.Uploaded)      // uploaded
+	binary.BigEndian.PutUint32(req[80:84], uint32(r.Event)) // event
+	binary.BigEndian.PutUint32(req[84:88], r.IP)            // ip
+	binary.BigEndian.PutUint32(req[88:92], r.Key)           // key
+	binary.BigEndian.PutUint32(req[92:96], r.NumWant)       // num_want
+	binary.BigEndian.PutUint16(req[96:98], r.Port)          // port
+	fmt.Printf("announce message: %x\n", req)
+	return req, nil
 }
 
 type AnnounceResponse struct {
@@ -267,14 +316,16 @@ func copyToSlice(dst []byte, src []byte, offset int) {
 	}
 }
 
-func readAnnounceResponse(conn net.Conn, peersWanted int) (AnnounceResponse, error) {
-	resp, err := decoder.ReadBytes(conn, 20+6*peersWanted)
+func readAnnounceResponse(conn net.Conn, piecesWanted int) (AnnounceResponse, error) {
+	resp := make([]byte, 4096)
+	n, err := conn.Read(resp)
 	if err != nil && err != io.EOF {
 		return AnnounceResponse{}, err
 	}
+	resp = resp[:n]
 
-	if len(resp) < 20 {
-		return AnnounceResponse{}, errors.New("invalid response")
+	if n < 20 {
+		return AnnounceResponse{}, fmt.Errorf("invalid response: %d", n)
 	}
 
 	action := binary.BigEndian.Uint32(resp[:4])
@@ -290,24 +341,22 @@ func readAnnounceResponse(conn net.Conn, peersWanted int) (AnnounceResponse, err
 			IP:   net.ParseIP(fmt.Sprintf("%d.%d.%d.%d", peerData[i], peerData[i+1], peerData[i+2], peerData[i+3])),
 			Port: uint16(int(peerData[i+4])<<8 | int(peerData[i+5])),
 		}
-		peers = append(peers, models.Peer{Addr: addr})
+		p := models.Peer{
+			Addr:         addr,
+			HavePieces:   make(map[int]struct{}),
+			PiecesWanted: piecesWanted,
+		}
+		peers = append(peers, p)
 	}
+
+	fmt.Printf("peers: %v\n", peers)
 
 	return AnnounceResponse{Action: Action(action), TransactionID: txID, Interval: interval, Leechers: leechers, Seeders: seeders, Peers: peers}, nil
 }
 
 func generateTransactionID() (uint32, error) {
 	var transactionID uint32
-	randomBytes := make([]byte, 4) // 4 bytes for a uint32
-
-	// Read 4 random bytes from the crypto/rand package
-	_, err := rand.Read(randomBytes)
-	if err != nil {
-		return 0, err
-	}
-
-	// Convert the random bytes to a uint32
-	transactionID = binary.BigEndian.Uint32(randomBytes)
-
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	transactionID = r.Uint32()
 	return transactionID, nil
 }

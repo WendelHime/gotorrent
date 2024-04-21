@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/WendelHime/gotorrent/internal/shared/models"
@@ -57,15 +58,18 @@ func TestGetPeers(t *testing.T) {
 						Body:       io.NopCloser(resp),
 					}
 				}))
+				r := strings.NewReader("01234567891012345678")
+				h := make([]byte, 20)
+				r.Read(h)
 				hash := models.Hash{
-					Hash: []byte("01234567891012345678"),
+					Hash: [20]byte(h),
 				}
 				return tracker, models.Metafile{
 					InfoHash: hash,
 					Info: models.Info{
 						Length: 100,
 						PiecesHashes: []models.Hash{
-							{Hash: []byte("01234567891012345678")},
+							{Hash: [20]byte(h)},
 						},
 					},
 				}
