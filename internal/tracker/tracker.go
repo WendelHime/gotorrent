@@ -51,6 +51,9 @@ type peersWithAddresses struct {
 }
 
 func (t *tracker) GetPeers(metafile models.Metafile) ([]models.Peer, error) {
+	if t.AnnounceURL == "" {
+		return nil, fmt.Errorf("announce url is empty")
+	}
 	switch {
 	case strings.HasPrefix(t.AnnounceURL, "http"):
 		return t.HTTPClient.GetPeers(t.AnnounceURL, metafile)
