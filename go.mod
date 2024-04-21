@@ -7,6 +7,7 @@ require (
 	github.com/jackpal/bencode-go v1.0.2
 	github.com/schollz/progressbar/v3 v3.14.2
 	github.com/stretchr/testify v1.9.0
+	github.com/zeebo/bencode v1.0.0
 )
 
 require (
