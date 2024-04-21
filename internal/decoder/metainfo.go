@@ -1,14 +1,13 @@
 package decoder
 
 import (
-	"bytes"
 	"crypto/sha1"
 	"io"
 	"log/slog"
 	"strings"
 
 	"github.com/WendelHime/gotorrent/internal/shared/models"
-	"github.com/jackpal/bencode-go"
+	"github.com/zeebo/bencode"
 )
 
 type MetafileDecoder interface {
@@ -21,20 +20,36 @@ func NewDecoder() MetafileDecoder {
 	return decoder{}
 }
 
+// serialization struct the represents the structure of a .torrent file
+// it is not immediately usable, so it can be converted to a TorrentFile struct
+type bencodeTorrent struct {
+	// URL of tracker server to get peers from
+	Announce     string     `bencode:"announce"`
+	AnnounceList [][]string `bencode:"announce-list"`
+	// Info is parsed as a RawMessage to ensure that the final info_hash is
+	// correct even in the case of the info dictionary being an unexpected shape
+	Info bencode.RawMessage `bencode:"info"`
+}
+
 func (decoder) Decode(torrent io.Reader) (models.Metafile, error) {
 	var response models.Metafile
-	err := bencode.Unmarshal(torrent, &response)
+	var bt bencodeTorrent
+	err := bencode.NewDecoder(torrent).Decode(&bt)
 	if err != nil {
 		slog.Error("failed to decode torrent: %v", err)
 		return response, err
 	}
 
-	infoHash, err := calculateInfoHash(response.Info)
+	infoHash := calculateInfoHash(bt.Info)
+	response.Announce = bt.Announce
+	response.AnnounceList = bt.AnnounceList
+	response.InfoHash = models.Hash{Hash: infoHash}
+	// TODO decode info
+	err = bencode.NewDecoder(strings.NewReader(string(bt.Info))).Decode(&response.Info)
 	if err != nil {
-		slog.Error("failed to calculate info hash: %v", err)
+		slog.Error("failed to decode torrent info: %v", err)
 		return response, err
 	}
-	response.InfoHash = models.Hash{Hash: infoHash}
 
 	response.Info.PiecesHashes, err = calculatePiecesHashes(response.Info.Pieces)
 	if err != nil {
@@ -45,15 +60,8 @@ func (decoder) Decode(torrent io.Reader) (models.Metafile, error) {
 	return response, nil
 }
 
-func calculateInfoHash(info models.Info) ([]byte, error) {
-	var b bytes.Buffer
-	err := bencode.Marshal(&b, info)
-	if err != nil {
-		return []byte{}, err
-	}
-
-	dst := sha1.Sum(b.Bytes())
-	return dst[:], nil
+func calculateInfoHash(info []byte) [20]byte {
+	return sha1.Sum(info)
 }
 
 func calculatePiecesHashes(pieces string) ([]models.Hash, error) {
@@ -69,7 +77,7 @@ func calculatePiecesHashes(pieces string) ([]models.Hash, error) {
 		if err == io.EOF {
 			break
 		}
-		piecesHashes = append(piecesHashes, models.Hash{Hash: hash})
+		piecesHashes = append(piecesHashes, models.Hash{Hash: [20]byte(hash)})
 	}
 
 	return piecesHashes, nil
