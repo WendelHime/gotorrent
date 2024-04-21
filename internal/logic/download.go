@@ -98,6 +98,10 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 		}
 		piecesQueue <- pieces[i]
 	}
+
+	if meta.Info.Length == 0 {
+		meta.Info.Length = calculateTotalLength(meta.Info.Files)
+	}
 	bar := progressbar.DefaultBytes(int64(meta.Info.Length), "downloading")
 	var wg sync.WaitGroup
 	wg.Add(len(pieces))
@@ -408,4 +412,12 @@ func (d *downloader) writeFile(filepath string, meta models.Metafile, piece mode
 	}
 
 	return writtenBytes, nil
+}
+
+func calculateTotalLength(files []models.File) int {
+	totalLength := 0
+	for _, file := range files {
+		totalLength += file.Length
+	}
+	return totalLength
 }
