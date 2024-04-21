@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,7 +72,7 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 		return err
 	}
 
-	d.log.Info("retrieving peers")
+	d.log.Info("retrieving peers", slog.Any("len piece hashes", len(meta.Info.PiecesHashes)))
 	peers, err := d.retrievePeers(meta)
 	if err != nil {
 		return err
@@ -81,11 +82,10 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 		return errors.New("no peers found")
 	}
 
-	peerClients := make([]peerClient, len(peers))
-	for i, peer := range peers {
+	peerClients := make([]peerClient, 0)
+	for _, peer := range peers {
 		client := p2p.NewClient(d.clientID)
-		peerClients[i] = peerClient{client: client, peer: &peer}
-		defer client.Disconnect()
+		peerClients = append(peerClients, peerClient{client: client, peer: &peer})
 	}
 
 	piecesQueue := make(chan models.Piece, len(meta.Info.PiecesHashes))
@@ -98,7 +98,7 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 		}
 		piecesQueue <- pieces[i]
 	}
-	bar := progressbar.Default(int64(meta.Info.Length), "downloading")
+	bar := progressbar.DefaultBytes(int64(meta.Info.Length), "downloading")
 	var wg sync.WaitGroup
 	wg.Add(len(pieces))
 
@@ -114,7 +114,10 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 	index := 0
 	for _, file := range meta.Info.Files {
 		begin := index
-		filePositions[file.Path] = FilePosition{
+		dirpath := path.Join(outputDir, strings.Join(file.Path[:len(file.Path)-1], "/"))
+		os.MkdirAll(dirpath, 0755)
+		filepath := path.Join(dirpath, file.Path[len(file.Path)-1])
+		filePositions[filepath] = FilePosition{
 			Begin: index,
 			End:   begin + file.Length,
 		}
@@ -138,9 +141,10 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 
 			// for multifile torrent
 			for _, file := range meta.Info.Files {
-				if piece.Blocks[0].Begin >= filePositions[file.Path].Begin && piece.Blocks[len(piece.Blocks)-1].Begin < filePositions[file.Path].End {
-					filepath := path.Join(outputDir, file.Path)
-					n, err := d.writeFile(filepath, meta, piece)
+				fp := path.Join(file.Path...)
+				fp = path.Join(outputDir, fp)
+				if piece.Blocks[0].Begin >= filePositions[fp].Begin && piece.Blocks[len(piece.Blocks)-1].Begin < filePositions[fp].End {
+					n, err := d.writeFile(fp, meta, piece)
 					if err != nil {
 						d.log.Error("failed to save piece to file", slog.Any("error", err))
 					}
@@ -186,6 +190,7 @@ func (d *downloader) retrievePeers(metafile models.Metafile) ([]models.Peer, err
 				p, err := t.GetPeers(metafile)
 				if err != nil && err != io.EOF {
 					d.log.Error("failed to get peers", slog.Any("error", err))
+					return
 				}
 
 				mutex.Lock()
@@ -197,7 +202,7 @@ func (d *downloader) retrievePeers(metafile models.Metafile) ([]models.Peer, err
 	}
 	wg.Wait()
 
-	d.log.Info("retrieved peers", slog.Int("amount", len(peers)))
+	d.log.Info("retrieved peers", slog.Any("peers", peers))
 	return peers, nil
 }
 
@@ -371,7 +376,7 @@ func checkHash(piece models.Piece) (bool, error) {
 			return false, err
 		}
 	}
-	return bytes.Equal(hash.Sum(nil), piece.Hash.Hash), nil
+	return bytes.Equal(hash.Sum(nil), piece.Hash.Hash[:]), nil
 }
 
 func createOutputDir(outputDir string) error {
