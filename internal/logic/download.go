@@ -139,6 +139,7 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 				n, err := d.writeFile(filepath, meta, piece)
 				if err != nil {
 					d.log.Error("failed to save piece to file", slog.Any("error", err))
+					continue
 				}
 				d.log.Info("piece saved to file", slog.Any("piece", piece.Index), slog.Int("amount_pieces", len(pieces)))
 				bar.Add(n)
@@ -153,6 +154,7 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 					n, err := d.writeFile(fp, meta, piece)
 					if err != nil {
 						d.log.Error("failed to save piece to file", slog.Any("error", err))
+						continue
 					}
 					bar.Add(n)
 				}
@@ -177,7 +179,7 @@ func (d *downloader) retrievePeers(metafile models.Metafile) ([]models.Peer, err
 	peers := make([]models.Peer, 0)
 	p, err := t.GetPeers(metafile)
 	if err != nil && err != io.EOF {
-		d.log.Error("failed to get peers", slog.Any("error", err))
+		d.log.Warn("failed to get peers", slog.Any("error", err))
 	}
 	peers = append(peers, p...)
 	mutex := sync.Mutex{}
@@ -195,7 +197,7 @@ func (d *downloader) retrievePeers(metafile models.Metafile) ([]models.Peer, err
 				t := tracker.NewTracker(announce, d.clientID)
 				p, err := t.GetPeers(metafile)
 				if err != nil && err != io.EOF {
-					d.log.Error("failed to get peers", slog.Any("error", err))
+					d.log.Warn("failed to get peers", slog.Any("error", err))
 					return
 				}
 
