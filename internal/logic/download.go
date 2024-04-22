@@ -385,6 +385,12 @@ func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue ch
 				}
 			}
 		}
+		if choosenPeer.busy {
+			mapPeers.mutex.Unlock()
+			piecesQueue <- piece
+			continue
+		}
+
 		choosenPeer.busy = true
 		mapPeers.mutex.Unlock()
 
@@ -401,9 +407,12 @@ func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue ch
 				d.log.Warn("peer does not have piece", slog.Any("piece", piece.Index), slog.Any("peer", choosenPeer.peer.Addr))
 				continue
 			}
+			mapPeers.mutex.Lock()
+			choosenPeer.busy = false
+			mapPeers.mutex.Unlock()
 			d.log.Warn("failed to download piece", slog.Any("error", err), slog.Any("piece", piece.Index))
 			piecesQueue <- piece
-			return
+			continue
 		}
 
 		piece.Blocks = sortBlocks(blocks)
