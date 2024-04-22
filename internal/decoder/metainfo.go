@@ -44,7 +44,6 @@ func (decoder) Decode(torrent io.Reader) (models.Metafile, error) {
 	response.Announce = bt.Announce
 	response.AnnounceList = bt.AnnounceList
 	response.InfoHash = models.Hash{Hash: infoHash}
-	// TODO decode info
 	err = bencode.NewDecoder(strings.NewReader(string(bt.Info))).Decode(&response.Info)
 	if err != nil {
 		slog.Error("failed to decode torrent info: %v", err)
@@ -55,6 +54,10 @@ func (decoder) Decode(torrent io.Reader) (models.Metafile, error) {
 	if err != nil {
 		slog.Error("failed to calculate pieces hashes: %v", err)
 		return response, err
+	}
+
+	if response.Info.Length > 0 {
+		response.Info.Files = []models.File{{Length: response.Info.Length, Path: []string{response.Info.Name}}}
 	}
 
 	return response, nil
