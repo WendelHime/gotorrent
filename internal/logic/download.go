@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -114,7 +115,7 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 	}
 	for i := range pieces {
 		pieces[i] = models.Piece{
-			Filepath: meta.Info.Name,
+			Filepath: filepath.Join(outputDir, meta.Info.Name),
 			Hash:     meta.Info.PiecesHashes[i],
 			Index:    i,
 		}
@@ -390,11 +391,12 @@ func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue ch
 		blocks, err := d.downloadPiece(metainfo, *choosenPeer, piece.Index)
 		if err != nil {
 			if errors.Is(err, ErrMissingPiece) || errors.Is(err, io.EOF) {
+				mapPeers.mutex.Lock()
 				if choosenPeer.publishedPieces {
-					mapPeers.mutex.Lock()
 					choosenPeer.retrievedPieces--
-					mapPeers.mutex.Unlock()
 				}
+				choosenPeer.busy = false
+				mapPeers.mutex.Unlock()
 				piecesQueue <- piece
 				d.log.Warn("peer does not have piece", slog.Any("piece", piece.Index), slog.Any("peer", choosenPeer.peer.Addr))
 				continue
@@ -408,6 +410,9 @@ func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue ch
 
 		isValid, err := checkHash(piece)
 		if err != nil {
+			mapPeers.mutex.Lock()
+			choosenPeer.busy = false
+			mapPeers.mutex.Unlock()
 			piecesQueue <- piece
 			d.log.Warn("failed to check hash", slog.Any("error", err), slog.Any("piece", piece.Index))
 			continue
@@ -415,6 +420,9 @@ func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue ch
 
 		if !isValid {
 			d.log.Warn("piece is not valid", slog.Any("piece", piece.Index))
+			mapPeers.mutex.Lock()
+			choosenPeer.busy = false
+			mapPeers.mutex.Unlock()
 			piecesQueue <- piece
 			continue
 		}
@@ -431,6 +439,7 @@ func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue ch
 		}
 		choosenPeer.retrievedPieces++
 		delete(mapPeers.AvailablePieces, piece.Index)
+		choosenPeer.busy = false
 		mapPeers.mutex.Unlock()
 
 		writeQueue <- piece
