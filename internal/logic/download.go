@@ -83,20 +83,40 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 		return errors.New("no peers found")
 	}
 
+	unifyPeers := make(map[string]struct{})
 	peerClients := make([]peerClient, 0)
 	for _, peer := range peers {
-		client := p2p.NewClient(d.clientID)
-		peerClients = append(peerClients, peerClient{client: client, peer: &peer})
+		addr := peer.Addr.String()
+		if strings.Contains(addr, "0.0.0.0") {
+			continue
+		}
+		if _, ok := unifyPeers[addr]; !ok {
+			client := p2p.NewClient(d.clientID)
+			peerClients = append(peerClients, peerClient{client: client, peer: &peer})
+			unifyPeers[addr] = struct{}{}
+		}
 	}
 
 	piecesQueue := make(chan models.Piece, len(meta.Info.PiecesHashes))
 	writeQueue := make(chan models.Piece, len(meta.Info.PiecesHashes))
 	pieces := make([]models.Piece, len(meta.Info.PiecesHashes))
+	filePositions := mapFilePosiions(meta.Info.Files, outputDir)
+	d.log.Info("file positions", slog.Any("file_positions", filePositions))
 	for i := range pieces {
 		pieces[i] = models.Piece{
-			Index: i,
-			Hash:  meta.Info.PiecesHashes[i],
+			Hash: meta.Info.PiecesHashes[i],
 		}
+		overallOffset := i * meta.Info.PieceLength
+		for fp, position := range filePositions {
+			if overallOffset >= position.Begin && overallOffset+meta.Info.PieceLength < position.End {
+				pieces[i].Filepath = fp
+				pieces[i].Index = position.ExpectedPieces
+				position.ExpectedPieces = position.ExpectedPieces + 1
+				break
+			}
+		}
+
+		d.log.Info("piece", slog.Any("piece", pieces[i]))
 		piecesQueue <- pieces[i]
 	}
 
@@ -115,55 +135,16 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 	var writeWaitGroup sync.WaitGroup
 	writeWaitGroup.Add(1)
 
-	// map file lengths begin and end from info total length
-	filePositions := make(map[string]FilePosition)
-	index := 0
-	for _, file := range meta.Info.Files {
-		begin := index
-		dirpath := path.Join(outputDir, strings.Join(file.Path[:len(file.Path)-1], "/"))
-		os.MkdirAll(dirpath, 0755)
-		filepath := path.Join(dirpath, file.Path[len(file.Path)-1])
-		filePositions[filepath] = FilePosition{
-			Begin: index,
-			End:   begin + file.Length,
-		}
-		index += file.Length
-	}
-
-	d.log.Info("file positions", slog.Any("file_positions", filePositions))
-
 	go func() {
 		defer writeWaitGroup.Done()
 		for piece := range writeQueue {
-			// if single file torrent
-			if len(meta.Info.Files) == 0 {
-				filepath := path.Join(outputDir, meta.Info.Name)
-				n, err := d.writeFile(filepath, meta, piece)
-				if err != nil {
-					d.log.Error("failed to save piece to file", slog.Any("error", err))
-					continue
-				}
-				d.log.Info("piece saved to file", slog.Any("piece", piece.Index), slog.Int("amount_pieces", len(pieces)))
-				bar.Add(n)
+			n, err := d.writeFile(piece.Filepath, meta, piece)
+			if err != nil {
+				d.log.Error("failed to save piece to file", slog.Any("error", err))
 				continue
 			}
-
-			// for multifile torrent
-			for _, file := range meta.Info.Files {
-				fp := path.Join(file.Path...)
-				fp = path.Join(outputDir, fp)
-				for _, block := range piece.Blocks {
-					pieceOffset := piece.Index*meta.Info.PieceLength + block.Begin
-					if pieceOffset >= filePositions[fp].Begin && pieceOffset < filePositions[fp].End {
-						n, err := d.writeFile(fp, meta, piece)
-						if err != nil {
-							d.log.Error("failed to save piece to file", slog.Any("error", err))
-							continue
-						}
-						bar.Add(n)
-					}
-				}
-			}
+			d.log.Info("piece saved to file", slog.Any("piece", piece.Index), slog.Int("amount_pieces", len(pieces)), slog.String("filepath", piece.Filepath))
+			bar.Add(n)
 		}
 	}()
 	wg.Wait()
@@ -174,8 +155,28 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 }
 
 type FilePosition struct {
-	Begin int
-	End   int
+	Begin          int
+	End            int
+	ExpectedPieces int
+}
+
+func mapFilePosiions(files []models.File, outputDir string) map[string]*FilePosition {
+	filePositions := make(map[string]*FilePosition)
+	index := 0
+	for _, file := range files {
+		begin := index
+		dirpath := path.Join(outputDir, strings.Join(file.Path[:len(file.Path)-1], "/"))
+		os.MkdirAll(dirpath, 0755)
+		filepath := path.Join(dirpath, file.Path[len(file.Path)-1])
+		filePositions[filepath] = &FilePosition{
+			Begin:          index,
+			End:            begin + file.Length,
+			ExpectedPieces: 0,
+		}
+		index += file.Length
+	}
+
+	return filePositions
 }
 
 func (d *downloader) retrievePeers(metafile models.Metafile) ([]models.Peer, error) {
@@ -345,16 +346,18 @@ func requestBlocks(client p2p.P2PClient, index int, length int) (int, error) {
 }
 
 func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue chan models.Piece, wg *sync.WaitGroup, metainfo models.Metafile, peerClient peerClient) {
-	var err error
 	for piece := range piecesQueue {
-		piece.Blocks, err = d.downloadPiece(metainfo, peerClient, piece.Index)
+		blocks, err := d.downloadPiece(metainfo, peerClient, piece.Index)
 		if err != nil {
 			piecesQueue <- piece
-			d.log.Warn("failed to download piece", slog.Any("error", err))
-			continue
+			if errors.Is(err, ErrMissingPiece) || errors.Is(err, io.EOF) {
+				d.log.Warn("peer does not have piece", slog.Any("piece", piece.Index))
+				continue
+			}
+			return
 		}
 
-		piece.Blocks = sortBlocks(piece.Blocks)
+		piece.Blocks = sortBlocks(blocks)
 
 		isValid, err := checkHash(piece)
 		if err != nil {
@@ -364,8 +367,8 @@ func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue ch
 		}
 
 		if !isValid {
-			piecesQueue <- piece
 			d.log.Warn("piece is invalid")
+			piecesQueue <- piece
 			continue
 		}
 

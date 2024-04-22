@@ -7,7 +7,8 @@ type Block struct {
 }
 
 type Piece struct {
-	Index  int
-	Hash   Hash
-	Blocks []Block
+	Index    int
+	Filepath string
+	Hash     Hash
+	Blocks   []Block
 }
