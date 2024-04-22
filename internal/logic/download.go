@@ -380,12 +380,12 @@ func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue ch
 				for _, peer := range peers {
 					if !peer.busy {
 						choosenPeer = peer
-						choosenPeer.busy = true
 						break
 					}
 				}
 			}
 		}
+		choosenPeer.busy = true
 		mapPeers.mutex.Unlock()
 
 		blocks, err := d.downloadPiece(metainfo, *choosenPeer, piece.Index)
