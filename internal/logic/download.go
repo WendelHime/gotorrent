@@ -55,8 +55,16 @@ func generateRandomPeerID() string {
 }
 
 type peerClient struct {
-	client p2p.P2PClient
-	peer   *models.Peer
+	client          p2p.P2PClient
+	peer            *models.Peer
+	publishedPieces bool
+	retrievedPieces int
+	busy            bool
+}
+
+type PeerMap struct {
+	AvailablePieces map[int][]*peerClient
+	mutex           *sync.Mutex
 }
 
 func (d *downloader) Download(metafile io.Reader, outputDir string) error {
@@ -100,11 +108,15 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 	piecesQueue := make(chan models.Piece, len(meta.Info.PiecesHashes))
 	writeQueue := make(chan models.Piece, len(meta.Info.PiecesHashes))
 	pieces := make([]models.Piece, len(meta.Info.PiecesHashes))
-	filePositions := mapFilePosiions(meta.Info.Files, outputDir)
-	d.log.Info("file positions", slog.Any("file_positions", filePositions))
+	filePositions := make(map[string]*FilePosition)
+	if meta.Info.Length == 0 {
+		filePositions = mapFilePosiions(meta.Info.Files, outputDir)
+	}
 	for i := range pieces {
 		pieces[i] = models.Piece{
-			Hash: meta.Info.PiecesHashes[i],
+			Filepath: meta.Info.Name,
+			Hash:     meta.Info.PiecesHashes[i],
+			Index:    i,
 		}
 		overallOffset := i * meta.Info.PieceLength
 		for fp, position := range filePositions {
@@ -116,7 +128,6 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 			}
 		}
 
-		d.log.Info("piece", slog.Any("piece", pieces[i]))
 		piecesQueue <- pieces[i]
 	}
 
@@ -125,11 +136,16 @@ func (d *downloader) Download(metafile io.Reader, outputDir string) error {
 	}
 	bar.ChangeMax(meta.Info.Length)
 	bar.Describe("downloading")
+	bar.RenderBlank()
 	var wg sync.WaitGroup
 	wg.Add(len(pieces))
+	mapPeers := &PeerMap{
+		AvailablePieces: make(map[int][]*peerClient),
+		mutex:           &sync.Mutex{},
+	}
 
 	for _, peerClient := range peerClients {
-		go d.downloadPieces(piecesQueue, writeQueue, &wg, meta, peerClient)
+		go d.downloadPieces(piecesQueue, writeQueue, &wg, meta, peerClient, mapPeers)
 	}
 
 	var writeWaitGroup sync.WaitGroup
@@ -345,15 +361,46 @@ func requestBlocks(client p2p.P2PClient, index int, length int) (int, error) {
 	return blocksRequested, nil
 }
 
-func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue chan models.Piece, wg *sync.WaitGroup, metainfo models.Metafile, peerClient peerClient) {
+func rankPeers(peers []*peerClient) []*peerClient {
+	// rank peers by retrieved pieces
+	sort.Slice(peers, func(i, j int) bool {
+		return peers[i].retrievedPieces > peers[j].retrievedPieces
+	})
+	return peers
+}
+
+func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue chan models.Piece, wg *sync.WaitGroup, metainfo models.Metafile, pc peerClient, mapPeers *PeerMap) {
 	for piece := range piecesQueue {
-		blocks, err := d.downloadPiece(metainfo, peerClient, piece.Index)
+		mapPeers.mutex.Lock()
+		choosenPeer := &pc
+		if peers, ok := mapPeers.AvailablePieces[piece.Index]; ok {
+			mapPeers.AvailablePieces[piece.Index] = rankPeers(mapPeers.AvailablePieces[piece.Index])
+			if len(peers) > 0 {
+				for _, peer := range peers {
+					if !peer.busy {
+						choosenPeer = peer
+						choosenPeer.busy = true
+						break
+					}
+				}
+			}
+		}
+		mapPeers.mutex.Unlock()
+
+		blocks, err := d.downloadPiece(metainfo, *choosenPeer, piece.Index)
 		if err != nil {
-			piecesQueue <- piece
 			if errors.Is(err, ErrMissingPiece) || errors.Is(err, io.EOF) {
-				d.log.Warn("peer does not have piece", slog.Any("piece", piece.Index))
+				if choosenPeer.publishedPieces {
+					mapPeers.mutex.Lock()
+					choosenPeer.retrievedPieces--
+					mapPeers.mutex.Unlock()
+				}
+				piecesQueue <- piece
+				d.log.Warn("peer does not have piece", slog.Any("piece", piece.Index), slog.Any("peer", choosenPeer.peer.Addr))
 				continue
 			}
+			d.log.Warn("failed to download piece", slog.Any("error", err), slog.Any("piece", piece.Index))
+			piecesQueue <- piece
 			return
 		}
 
@@ -362,15 +409,29 @@ func (d *downloader) downloadPieces(piecesQueue chan models.Piece, writeQueue ch
 		isValid, err := checkHash(piece)
 		if err != nil {
 			piecesQueue <- piece
-			d.log.Warn("failed to check hash", slog.Any("error", err))
+			d.log.Warn("failed to check hash", slog.Any("error", err), slog.Any("piece", piece.Index))
 			continue
 		}
 
 		if !isValid {
-			d.log.Warn("piece is invalid")
+			d.log.Warn("piece is not valid", slog.Any("piece", piece.Index))
 			piecesQueue <- piece
 			continue
 		}
+
+		mapPeers.mutex.Lock()
+		if !pc.publishedPieces {
+			for index := range pc.peer.HavePieces {
+				if _, ok := mapPeers.AvailablePieces[index]; !ok {
+					mapPeers.AvailablePieces[index] = make([]*peerClient, 0)
+				}
+				mapPeers.AvailablePieces[index] = append(mapPeers.AvailablePieces[index], choosenPeer)
+				choosenPeer.publishedPieces = true
+			}
+		}
+		choosenPeer.retrievedPieces++
+		delete(mapPeers.AvailablePieces, piece.Index)
+		mapPeers.mutex.Unlock()
 
 		writeQueue <- piece
 		wg.Done()
